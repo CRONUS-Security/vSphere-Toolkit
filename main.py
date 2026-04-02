@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-import csv
-import json
 import ssl
-from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import typer
+from core.outputter import ResultOutputter
 from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim
 
 
 app = typer.Typer(help="vSphere 信息探测与资产枚举工具")
+
+
+class OutputFormat(str, Enum):
+	csv = "csv"
+	json = "json"
+	txt = "txt"
 
 
 def build_ssl_context(skip_verify: bool) -> ssl.SSLContext:
@@ -43,41 +48,6 @@ def safe_get(value: Any, attr: str, default: Any = None) -> Any:
 	if value is None:
 		return default
 	return getattr(value, attr, default)
-
-
-def stringify(value: Any) -> str:
-	if value is None:
-		return ""
-	if isinstance(value, (str, int, float, bool)):
-		return str(value)
-	if isinstance(value, datetime):
-		if value.tzinfo is None:
-			return value.replace(tzinfo=timezone.utc).isoformat()
-		return value.isoformat()
-	try:
-		return json.dumps(value, ensure_ascii=False)
-	except TypeError:
-		return str(value)
-
-
-def rows_to_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-	path.parent.mkdir(parents=True, exist_ok=True)
-	if not rows:
-		path.write_text("", encoding="utf-8")
-		return
-
-	columns: list[str] = []
-	for row in rows:
-		for key in row.keys():
-			if key not in columns:
-				columns.append(key)
-
-	with path.open("w", encoding="utf-8-sig", newline="") as handle:
-		writer = csv.DictWriter(handle, fieldnames=columns)
-		writer.writeheader()
-		for row in rows:
-			normalized = {key: stringify(row.get(key)) for key in columns}
-			writer.writerow(normalized)
 
 
 def host_type(content: Any) -> str:
@@ -357,30 +327,41 @@ def collect_target_rows(content: Any) -> list[dict[str, Any]]:
 	]
 
 
-def export_all_tables(content: Any, output_dir: Path) -> dict[str, int]:
-	tables: dict[str, list[dict[str, Any]]] = {
-		"target_info.csv": collect_target_rows(content),
-		"hosts.csv": collect_host_rows(content),
-		"virtual_machines.csv": collect_vm_rows(content),
-		"datastores.csv": collect_datastore_rows(content),
-		"networks.csv": collect_network_rows(content),
-		"users.csv": collect_esxi_user_rows(content),
+def build_tables(content: Any) -> dict[str, list[dict[str, Any]]]:
+	return {
+		"target_info": collect_target_rows(content),
+		"hosts": collect_host_rows(content),
+		"virtual_machines": collect_vm_rows(content),
+		"datastores": collect_datastore_rows(content),
+		"networks": collect_network_rows(content),
+		"users": collect_esxi_user_rows(content),
 	}
 
-	stats: dict[str, int] = {}
-	for filename, rows in tables.items():
-		rows_to_csv(output_dir / filename, rows)
-		stats[filename] = len(rows)
-	return stats
+
+@app.callback()
+def global_options(
+	ctx: typer.Context,
+	output_format: OutputFormat = typer.Option(
+		OutputFormat.csv,
+		"--format",
+		"-f",
+		help="全局输出格式，可选: csv/json/txt",
+		case_sensitive=False,
+	),
+) -> None:
+	ctx.ensure_object(dict)
+	ctx.obj["output_format"] = output_format.value
 
 
 @app.command(help="探测目标是否为 vSphere，并识别 vCenter / ESXi")
 def probe(
+	ctx: typer.Context,
 	host: str = typer.Option(..., "--host", "-H", help="vCenter/ESXi 地址"),
 	user: str = typer.Option(..., "--user", "-u", help="用户名"),
 	password: Optional[str] = typer.Option(None, "--password", "-p", prompt=True, hide_input=True),
 	port: int = typer.Option(443, "--port", help="API 端口"),
 	insecure: bool = typer.Option(False, "--insecure", help="跳过 SSL 校验（自签证书常用）"),
+	output_dir: Path = typer.Option(Path("./vSphere-info"), "--output-dir", help="输出目录"),
 ) -> None:
 	si = None
 	try:
@@ -388,12 +369,29 @@ def probe(
 		content = si.RetrieveContent()
 		target_kind = host_type(content)
 		about = safe_get(content, "about")
+		selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
+
+		probe_row = {
+			"target_type": target_kind,
+			"api_type": safe_get(about, "apiType", "Unknown"),
+			"product_full_name": safe_get(about, "fullName", "Unknown"),
+			"product_name": safe_get(about, "name", "Unknown"),
+			"version": safe_get(about, "version", "Unknown"),
+			"build": safe_get(about, "build", "Unknown"),
+			"instance_uuid": safe_get(about, "instanceUuid", "Unknown"),
+			"vendor": safe_get(about, "vendor", "Unknown"),
+			"os_type": safe_get(about, "osType", "Unknown"),
+		}
+
+		outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
+		output_path = outputter.write_table("probe_result", [probe_row])
 
 		typer.secho("[+] 探测成功", fg=typer.colors.GREEN)
 		typer.echo(f"目标类型: {target_kind}")
 		typer.echo(f"产品全称: {safe_get(about, 'fullName', 'Unknown')}")
 		typer.echo(f"版本: {safe_get(about, 'version', 'Unknown')}  Build: {safe_get(about, 'build', 'Unknown')}")
 		typer.echo(f"实例 UUID: {safe_get(about, 'instanceUuid', 'Unknown')}")
+		typer.echo(f"输出文件: {output_path.resolve()}")
 	except Exception as exc:
 		typer.secho(f"[-] 探测失败: {exc}", fg=typer.colors.RED)
 		raise typer.Exit(code=1)
@@ -402,14 +400,15 @@ def probe(
 			Disconnect(si)
 
 
-@app.command(help="采集 vSphere 资产信息并输出为 CSV 到 ./vSphere-info")
+@app.command(help="采集 vSphere 资产信息并按全局格式输出到 ./vSphere-info")
 def collect(
+	ctx: typer.Context,
 	host: str = typer.Option(..., "--host", "-H", help="vCenter/ESXi 地址"),
 	user: str = typer.Option(..., "--user", "-u", help="用户名"),
 	password: Optional[str] = typer.Option(None, "--password", "-p", prompt=True, hide_input=True),
 	port: int = typer.Option(443, "--port", help="API 端口"),
 	insecure: bool = typer.Option(False, "--insecure", help="跳过 SSL 校验（自签证书常用）"),
-	output_dir: Path = typer.Option(Path("./vSphere-info"), "--output-dir", help="CSV 输出目录"),
+	output_dir: Path = typer.Option(Path("./vSphere-info"), "--output-dir", help="输出目录"),
 ) -> None:
 	si = None
 	try:
@@ -417,11 +416,13 @@ def collect(
 		si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure)
 		content = si.RetrieveContent()
 		target_kind = host_type(content)
+		selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
 
 		typer.secho(f"[+] 已连接，目标类型: {target_kind}", fg=typer.colors.GREEN)
-		typer.echo("[*] 正在采集并导出 CSV，请稍候 ...")
+		typer.echo(f"[*] 正在采集并导出 {selected_format.upper()}，请稍候 ...")
 
-		stats = export_all_tables(content, output_dir)
+		outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
+		stats = outputter.export_tables(build_tables(content))
 		typer.secho(f"[+] 导出完成: {output_dir.resolve()}", fg=typer.colors.GREEN)
 		for table_name, count in stats.items():
 			typer.echo(f"  - {table_name}: {count} 行")
