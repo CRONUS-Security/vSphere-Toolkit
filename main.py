@@ -9,6 +9,7 @@ from typing import Any, Iterable, Optional
 
 import typer
 from core.outputter import ResultOutputter
+from core.proxy import ProxyConfig, parse_proxy, use_proxy
 from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim
 
@@ -348,9 +349,18 @@ def global_options(
 		help="全局输出格式，可选: csv/json/txt",
 		case_sensitive=False,
 	),
+	proxy: Optional[str] = typer.Option(
+		None,
+		"--proxy",
+		help="全局代理地址，支持 http:// https:// socks5:// ，示例: socks5://127.0.0.1:1080",
+	),
 ) -> None:
 	ctx.ensure_object(dict)
 	ctx.obj["output_format"] = output_format.value
+	try:
+		ctx.obj["proxy"] = parse_proxy(proxy)
+	except ValueError as exc:
+		raise typer.BadParameter(str(exc), param_hint="--proxy") from exc
 
 
 @app.command(help="探测目标是否为 vSphere，并识别 vCenter / ESXi")
@@ -363,41 +373,48 @@ def probe(
 	insecure: bool = typer.Option(False, "--insecure", help="跳过 SSL 校验（自签证书常用）"),
 	output_dir: Path = typer.Option(Path("./vSphere-info"), "--output-dir", help="输出目录"),
 ) -> None:
-	si = None
+	proxy_config: Optional[ProxyConfig] = (ctx.obj or {}).get("proxy")
+
 	try:
-		si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure)
-		content = si.RetrieveContent()
-		target_kind = host_type(content)
-		about = safe_get(content, "about")
-		selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
+		with use_proxy(proxy_config) as active_proxy:
+			if active_proxy:
+				typer.echo(f"[*] 已启用代理: {active_proxy.display_url}")
 
-		probe_row = {
-			"target_type": target_kind,
-			"api_type": safe_get(about, "apiType", "Unknown"),
-			"product_full_name": safe_get(about, "fullName", "Unknown"),
-			"product_name": safe_get(about, "name", "Unknown"),
-			"version": safe_get(about, "version", "Unknown"),
-			"build": safe_get(about, "build", "Unknown"),
-			"instance_uuid": safe_get(about, "instanceUuid", "Unknown"),
-			"vendor": safe_get(about, "vendor", "Unknown"),
-			"os_type": safe_get(about, "osType", "Unknown"),
-		}
+			si = None
+			try:
+				si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure)
+				content = si.RetrieveContent()
+				target_kind = host_type(content)
+				about = safe_get(content, "about")
+				selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
 
-		outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
-		output_path = outputter.write_table("probe_result", [probe_row])
+				probe_row = {
+					"target_type": target_kind,
+					"api_type": safe_get(about, "apiType", "Unknown"),
+					"product_full_name": safe_get(about, "fullName", "Unknown"),
+					"product_name": safe_get(about, "name", "Unknown"),
+					"version": safe_get(about, "version", "Unknown"),
+					"build": safe_get(about, "build", "Unknown"),
+					"instance_uuid": safe_get(about, "instanceUuid", "Unknown"),
+					"vendor": safe_get(about, "vendor", "Unknown"),
+					"os_type": safe_get(about, "osType", "Unknown"),
+				}
 
-		typer.secho("[+] 探测成功", fg=typer.colors.GREEN)
-		typer.echo(f"目标类型: {target_kind}")
-		typer.echo(f"产品全称: {safe_get(about, 'fullName', 'Unknown')}")
-		typer.echo(f"版本: {safe_get(about, 'version', 'Unknown')}  Build: {safe_get(about, 'build', 'Unknown')}")
-		typer.echo(f"实例 UUID: {safe_get(about, 'instanceUuid', 'Unknown')}")
-		typer.echo(f"输出文件: {output_path.resolve()}")
+				outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
+				output_path = outputter.write_table("probe_result", [probe_row])
+
+				typer.secho("[+] 探测成功", fg=typer.colors.GREEN)
+				typer.echo(f"目标类型: {target_kind}")
+				typer.echo(f"产品全称: {safe_get(about, 'fullName', 'Unknown')}")
+				typer.echo(f"版本: {safe_get(about, 'version', 'Unknown')}  Build: {safe_get(about, 'build', 'Unknown')}")
+				typer.echo(f"实例 UUID: {safe_get(about, 'instanceUuid', 'Unknown')}")
+				typer.echo(f"输出文件: {output_path.resolve()}")
+			finally:
+				if si:
+					Disconnect(si)
 	except Exception as exc:
 		typer.secho(f"[-] 探测失败: {exc}", fg=typer.colors.RED)
 		raise typer.Exit(code=1)
-	finally:
-		if si:
-			Disconnect(si)
 
 
 @app.command(help="采集 vSphere 资产信息并按全局格式输出到 ./vSphere-info")
@@ -410,28 +427,35 @@ def collect(
 	insecure: bool = typer.Option(False, "--insecure", help="跳过 SSL 校验（自签证书常用）"),
 	output_dir: Path = typer.Option(Path("./vSphere-info"), "--output-dir", help="输出目录"),
 ) -> None:
-	si = None
+	proxy_config: Optional[ProxyConfig] = (ctx.obj or {}).get("proxy")
+
 	try:
-		typer.echo(f"[*] 正在连接 {host}:{port} ...")
-		si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure)
-		content = si.RetrieveContent()
-		target_kind = host_type(content)
-		selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
+		with use_proxy(proxy_config) as active_proxy:
+			if active_proxy:
+				typer.echo(f"[*] 已启用代理: {active_proxy.display_url}")
 
-		typer.secho(f"[+] 已连接，目标类型: {target_kind}", fg=typer.colors.GREEN)
-		typer.echo(f"[*] 正在采集并导出 {selected_format.upper()}，请稍候 ...")
+			si = None
+			try:
+				typer.echo(f"[*] 正在连接 {host}:{port} ...")
+				si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure)
+				content = si.RetrieveContent()
+				target_kind = host_type(content)
+				selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
 
-		outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
-		stats = outputter.export_tables(build_tables(content))
-		typer.secho(f"[+] 导出完成: {output_dir.resolve()}", fg=typer.colors.GREEN)
-		for table_name, count in stats.items():
-			typer.echo(f"  - {table_name}: {count} 行")
+				typer.secho(f"[+] 已连接，目标类型: {target_kind}", fg=typer.colors.GREEN)
+				typer.echo(f"[*] 正在采集并导出 {selected_format.upper()}，请稍候 ...")
+
+				outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
+				stats = outputter.export_tables(build_tables(content))
+				typer.secho(f"[+] 导出完成: {output_dir.resolve()}", fg=typer.colors.GREEN)
+				for table_name, count in stats.items():
+					typer.echo(f"  - {table_name}: {count} 行")
+			finally:
+				if si:
+					Disconnect(si)
 	except Exception as exc:
 		typer.secho(f"[-] 采集失败: {exc}", fg=typer.colors.RED)
 		raise typer.Exit(code=1)
-	finally:
-		if si:
-			Disconnect(si)
 
 
 if __name__ == "__main__":
