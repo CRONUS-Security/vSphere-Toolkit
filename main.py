@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import ssl
 import time
 from enum import Enum
@@ -39,9 +40,17 @@ def connect_vsphere(host: str, user: str, password: str, port: int, insecure: bo
 
 
 def is_retryable_error(exc: Exception) -> bool:
-	message = str(exc).lower()
+	message = f"{exc!r} {exc}".lower()
+	if "10054" in message:
+		return True
+
+	if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 10054:
+		return True
+
 	retry_keywords = [
 		"remote end closed connection",
+		"forcibly closed by the remote host",
+		"an existing connection was forcibly closed",
 		"connection reset",
 		"connection aborted",
 		"timed out",
@@ -50,6 +59,26 @@ def is_retryable_error(exc: Exception) -> bool:
 		"broken pipe",
 	]
 	return any(keyword in message for keyword in retry_keywords)
+
+
+def load_collect_state(state_path: Path) -> dict[str, Any]:
+	if not state_path.exists():
+		return {"completed_tables": {}}
+
+	try:
+		data = json.loads(state_path.read_text(encoding="utf-8"))
+		if not isinstance(data, dict):
+			return {"completed_tables": {}}
+		if not isinstance(data.get("completed_tables"), dict):
+			data["completed_tables"] = {}
+		return data
+	except Exception:
+		return {"completed_tables": {}}
+
+
+def save_collect_state(state_path: Path, state: dict[str, Any]) -> None:
+	state_path.parent.mkdir(parents=True, exist_ok=True)
+	state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def iter_objects(content: Any, vim_type: type) -> Iterable[Any]:
@@ -442,8 +471,30 @@ def collect(
 	retry: int = typer.Option(3, "--retry", min=0, help="失败自动重试次数（不含首次）"),
 	retry_delay: float = typer.Option(2.0, "--retry-delay", min=0.0, help="首次重试前等待秒数"),
 	retry_backoff: float = typer.Option(2.0, "--retry-backoff", min=1.0, help="重试退避倍数"),
+	resume: bool = typer.Option(False, "--resume", help="按表级断点续采（需要状态文件）"),
+	state_file: Optional[Path] = typer.Option(None, "--state-file", help="断点状态文件路径，默认 output_dir/.collect-state.json"),
 ) -> None:
 	proxy_config: Optional[ProxyConfig] = (ctx.obj or {}).get("proxy")
+	selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
+	effective_state_file = state_file or (output_dir / ".collect-state.json")
+
+	expected_target = {
+		"host": host,
+		"port": port,
+		"format": selected_format,
+	}
+
+	if resume:
+		state = load_collect_state(effective_state_file)
+		if state.get("target") not in (None, expected_target):
+			typer.secho("[!] 状态文件与当前目标/格式不一致，将忽略旧状态并重新开始。", fg=typer.colors.YELLOW)
+			state = {"target": expected_target, "completed_tables": {}}
+		else:
+			state["target"] = expected_target
+		save_collect_state(effective_state_file, state)
+		typer.echo(f"[*] 已启用断点续采，状态文件: {effective_state_file.resolve()}")
+	else:
+		state = {"target": expected_target, "completed_tables": {}}
 
 	try:
 		with use_proxy(proxy_config) as active_proxy:
@@ -462,7 +513,6 @@ def collect(
 					si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure, proxy=proxy_config)
 					content = si.RetrieveContent()
 					target_kind = host_type(content)
-					selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
 
 					typer.secho(f"[+] 已连接，目标类型: {target_kind}", fg=typer.colors.GREEN)
 					typer.echo(f"[*] 正在采集并实时导出 {selected_format.upper()}，请稍候 ...")
@@ -480,17 +530,31 @@ def collect(
 					]
 
 					for table_name, collector in table_collectors:
+						completed_info = (state.get("completed_tables") or {}).get(table_name)
+						expected_output = output_dir / f"{table_name}.{selected_format}"
+						if resume and completed_info and expected_output.exists():
+							rows_done = int(completed_info.get("rows", 0) or 0)
+							stats[table_name] = rows_done
+							typer.echo(f"  - {table_name}: 已完成，跳过（断点续采，{rows_done} 行）")
+							continue
+
 						typer.echo(f"[*] 采集表: {table_name}")
 						rows: list[dict[str, Any]] = []
+						last_output_path = expected_output
 						try:
 							for idx, row in enumerate(collector(content), start=1):
 								rows.append(row)
 								if idx % checkpoint_rows == 0:
-									outputter.write_table(table_name, rows)
+									last_output_path = outputter.write_table(table_name, rows)
 						finally:
-							outputter.write_table(table_name, rows)
+							last_output_path = outputter.write_table(table_name, rows)
 
 						stats[table_name] = len(rows)
+						state.setdefault("completed_tables", {})[table_name] = {
+							"rows": len(rows),
+							"output": last_output_path.name,
+						}
+						save_collect_state(effective_state_file, state)
 						typer.echo(f"  - {table_name}: {len(rows)} 行（已落盘）")
 
 					typer.secho(f"[+] 导出完成: {output_dir.resolve()}", fg=typer.colors.GREEN)
