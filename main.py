@@ -62,9 +62,7 @@ def host_type(content: Any) -> str:
 	return f"Unknown({api_type})"
 
 
-def collect_vm_rows(content: Any) -> list[dict[str, Any]]:
-	vm_rows: list[dict[str, Any]] = []
-
+def iter_vm_rows(content: Any) -> Iterable[dict[str, Any]]:
 	for vm in iter_objects(content, vim.VirtualMachine):
 		config = safe_get(vm, "config")
 		runtime = safe_get(vm, "runtime")
@@ -118,84 +116,83 @@ def collect_vm_rows(content: Any) -> list[dict[str, Any]]:
 
 		host_obj = safe_get(runtime, "host")
 
-		vm_rows.append(
-			{
-				"vm_name": safe_get(vm, "name"),
-				"vm_moid": safe_get(vm, "_moId"),
-				"instance_uuid": safe_get(config, "instanceUuid"),
-				"bios_uuid": safe_get(config, "uuid"),
-				"power_state": safe_get(runtime, "powerState"),
-				"connection_state": safe_get(runtime, "connectionState"),
-				"boot_time": safe_get(runtime, "bootTime"),
-				"suspend_time": safe_get(runtime, "suspendTime"),
-				"guest_state": safe_get(guest, "guestState"),
-				"guest_os_full_name": safe_get(config, "guestFullName"),
-				"guest_os_id": safe_get(config, "guestId"),
-				"guest_host_name": safe_get(guest, "hostName"),
-				"guest_primary_ip": safe_get(guest, "ipAddress"),
-				"tools_status": safe_get(guest, "toolsStatus"),
-				"tools_running_status": safe_get(guest, "toolsRunningStatus"),
-				"tools_version": safe_get(guest, "toolsVersion"),
-				"cpu_count": safe_get(hardware, "numCPU"),
-				"cores_per_socket": safe_get(hardware, "numCoresPerSocket"),
-				"memory_mb": safe_get(hardware, "memoryMB"),
-				"memory_size_mb": safe_get(safe_get(summary, "config"), "memorySizeMB"),
-				"cpu_reservation_mhz": safe_get(safe_get(config, "cpuAllocation"), "reservation"),
-				"memory_reservation_mb": safe_get(safe_get(config, "memoryAllocation"), "reservation"),
-				"host_name": safe_get(host_obj, "name"),
-				"resource_pool": safe_get(safe_get(vm, "resourcePool"), "name"),
-				"folder": safe_get(safe_get(vm, "parent"), "name"),
-				"annotation": safe_get(config, "annotation"),
-				"disks": disks,
-				"nics": nics,
-				"guest_nics": guest_nics,
-			}
-		)
+		yield {
+			"vm_name": safe_get(vm, "name"),
+			"vm_moid": safe_get(vm, "_moId"),
+			"instance_uuid": safe_get(config, "instanceUuid"),
+			"bios_uuid": safe_get(config, "uuid"),
+			"power_state": safe_get(runtime, "powerState"),
+			"connection_state": safe_get(runtime, "connectionState"),
+			"boot_time": safe_get(runtime, "bootTime"),
+			"suspend_time": safe_get(runtime, "suspendTime"),
+			"guest_state": safe_get(guest, "guestState"),
+			"guest_os_full_name": safe_get(config, "guestFullName"),
+			"guest_os_id": safe_get(config, "guestId"),
+			"guest_host_name": safe_get(guest, "hostName"),
+			"guest_primary_ip": safe_get(guest, "ipAddress"),
+			"tools_status": safe_get(guest, "toolsStatus"),
+			"tools_running_status": safe_get(guest, "toolsRunningStatus"),
+			"tools_version": safe_get(guest, "toolsVersion"),
+			"cpu_count": safe_get(hardware, "numCPU"),
+			"cores_per_socket": safe_get(hardware, "numCoresPerSocket"),
+			"memory_mb": safe_get(hardware, "memoryMB"),
+			"memory_size_mb": safe_get(safe_get(summary, "config"), "memorySizeMB"),
+			"cpu_reservation_mhz": safe_get(safe_get(config, "cpuAllocation"), "reservation"),
+			"memory_reservation_mb": safe_get(safe_get(config, "memoryAllocation"), "reservation"),
+			"host_name": safe_get(host_obj, "name"),
+			"resource_pool": safe_get(safe_get(vm, "resourcePool"), "name"),
+			"folder": safe_get(safe_get(vm, "parent"), "name"),
+			"annotation": safe_get(config, "annotation"),
+			"disks": disks,
+			"nics": nics,
+			"guest_nics": guest_nics,
+		}
 
-	return vm_rows
+
+def collect_vm_rows(content: Any) -> list[dict[str, Any]]:
+	return list(iter_vm_rows(content))
+
+
+def iter_datastore_rows(content: Any) -> Iterable[dict[str, Any]]:
+	for ds in iter_objects(content, vim.Datastore):
+		summary = safe_get(ds, "summary")
+		yield {
+			"name": safe_get(ds, "name"),
+			"moid": safe_get(ds, "_moId"),
+			"url": safe_get(summary, "url"),
+			"type": safe_get(summary, "type"),
+			"capacity": safe_get(summary, "capacity"),
+			"free_space": safe_get(summary, "freeSpace"),
+			"accessible": safe_get(summary, "accessible"),
+			"multiple_host_access": safe_get(summary, "multipleHostAccess"),
+			"uncommitted": safe_get(summary, "uncommitted"),
+		}
 
 
 def collect_datastore_rows(content: Any) -> list[dict[str, Any]]:
-	rows: list[dict[str, Any]] = []
-	for ds in iter_objects(content, vim.Datastore):
-		summary = safe_get(ds, "summary")
-		rows.append(
-			{
-				"name": safe_get(ds, "name"),
-				"moid": safe_get(ds, "_moId"),
-				"url": safe_get(summary, "url"),
-				"type": safe_get(summary, "type"),
-				"capacity": safe_get(summary, "capacity"),
-				"free_space": safe_get(summary, "freeSpace"),
-				"accessible": safe_get(summary, "accessible"),
-				"multiple_host_access": safe_get(summary, "multipleHostAccess"),
-				"uncommitted": safe_get(summary, "uncommitted"),
-			}
-		)
-	return rows
+	return list(iter_datastore_rows(content))
+
+
+def iter_network_rows(content: Any) -> Iterable[dict[str, Any]]:
+	for net in iter_objects(content, vim.Network):
+		summary = safe_get(net, "summary")
+		yield {
+			"name": safe_get(net, "name"),
+			"moid": safe_get(net, "_moId"),
+			"overall_status": safe_get(net, "overallStatus"),
+			"accessible": safe_get(summary, "accessible"),
+			"ip_pool_name": safe_get(summary, "ipPoolName"),
+			"datacenter": safe_get(safe_get(net, "parent"), "name"),
+			"vm_count": len(safe_get(net, "vm", []) or []),
+			"host_count": len(safe_get(net, "host", []) or []),
+		}
 
 
 def collect_network_rows(content: Any) -> list[dict[str, Any]]:
-	rows: list[dict[str, Any]] = []
-	for net in iter_objects(content, vim.Network):
-		summary = safe_get(net, "summary")
-		rows.append(
-			{
-				"name": safe_get(net, "name"),
-				"moid": safe_get(net, "_moId"),
-				"overall_status": safe_get(net, "overallStatus"),
-				"accessible": safe_get(summary, "accessible"),
-				"ip_pool_name": safe_get(summary, "ipPoolName"),
-				"datacenter": safe_get(safe_get(net, "parent"), "name"),
-				"vm_count": len(safe_get(net, "vm", []) or []),
-				"host_count": len(safe_get(net, "host", []) or []),
-			}
-		)
-	return rows
+	return list(iter_network_rows(content))
 
 
-def collect_host_rows(content: Any) -> list[dict[str, Any]]:
-	rows: list[dict[str, Any]] = []
+def iter_host_rows(content: Any) -> Iterable[dict[str, Any]]:
 	for host in iter_objects(content, vim.HostSystem):
 		summary = safe_get(host, "summary")
 		hardware = safe_get(summary, "hardware")
@@ -236,44 +233,44 @@ def collect_host_rows(content: Any) -> list[dict[str, Any]]:
 
 		vcenter_ip = safe_get(runtime, "managementServerIp")
 
-		rows.append(
-			{
-				"name": safe_get(host, "name"),
-				"moid": safe_get(host, "_moId"),
-				"connection_state": safe_get(runtime, "connectionState"),
-				"power_state": safe_get(runtime, "powerState"),
-				"in_maintenance_mode": safe_get(runtime, "inMaintenanceMode"),
-				"vcenter_ip": vcenter_ip,
-				"managed_by_vcenter": bool(vcenter_ip),
-				"product_name": safe_get(safe_get(config, "product"), "name"),
-				"product_full_name": safe_get(safe_get(config, "product"), "fullName"),
-				"product_version": safe_get(safe_get(config, "product"), "version"),
-				"build": safe_get(safe_get(config, "product"), "build"),
-				"vendor": safe_get(hardware, "vendor"),
-				"model": safe_get(hardware, "model"),
-				"uuid": safe_get(hardware, "uuid"),
-				"cpu_model": safe_get(hardware, "cpuModel"),
-				"cpu_cores": safe_get(hardware, "numCpuCores"),
-				"cpu_threads": safe_get(hardware, "numCpuThreads"),
-				"memory_size_bytes": safe_get(hardware, "memorySize"),
-				"overall_cpu_usage_mhz": safe_get(quick_stats, "overallCpuUsage"),
-				"overall_memory_usage_mb": safe_get(quick_stats, "overallMemoryUsage"),
-				"uptime_seconds": safe_get(quick_stats, "uptime"),
-				"dns_host_name": safe_get(safe_get(network, "dnsConfig"), "hostName"),
-				"dns_domain_name": safe_get(safe_get(network, "dnsConfig"), "domainName"),
-				"dns_servers": safe_get(safe_get(network, "dnsConfig"), "address"),
-				"vm_count": len(safe_get(host, "vm", []) or []),
-				"datastore_count": len(safe_get(host, "datastore", []) or []),
-				"network_count": len(safe_get(host, "network", []) or []),
-				"pnic": pnic_rows,
-				"vmkernel_nic": vmkernel_rows,
-			}
-		)
-	return rows
+		yield {
+			"name": safe_get(host, "name"),
+			"moid": safe_get(host, "_moId"),
+			"connection_state": safe_get(runtime, "connectionState"),
+			"power_state": safe_get(runtime, "powerState"),
+			"in_maintenance_mode": safe_get(runtime, "inMaintenanceMode"),
+			"vcenter_ip": vcenter_ip,
+			"managed_by_vcenter": bool(vcenter_ip),
+			"product_name": safe_get(safe_get(config, "product"), "name"),
+			"product_full_name": safe_get(safe_get(config, "product"), "fullName"),
+			"product_version": safe_get(safe_get(config, "product"), "version"),
+			"build": safe_get(safe_get(config, "product"), "build"),
+			"vendor": safe_get(hardware, "vendor"),
+			"model": safe_get(hardware, "model"),
+			"uuid": safe_get(hardware, "uuid"),
+			"cpu_model": safe_get(hardware, "cpuModel"),
+			"cpu_cores": safe_get(hardware, "numCpuCores"),
+			"cpu_threads": safe_get(hardware, "numCpuThreads"),
+			"memory_size_bytes": safe_get(hardware, "memorySize"),
+			"overall_cpu_usage_mhz": safe_get(quick_stats, "overallCpuUsage"),
+			"overall_memory_usage_mb": safe_get(quick_stats, "overallMemoryUsage"),
+			"uptime_seconds": safe_get(quick_stats, "uptime"),
+			"dns_host_name": safe_get(safe_get(network, "dnsConfig"), "hostName"),
+			"dns_domain_name": safe_get(safe_get(network, "dnsConfig"), "domainName"),
+			"dns_servers": safe_get(safe_get(network, "dnsConfig"), "address"),
+			"vm_count": len(safe_get(host, "vm", []) or []),
+			"datastore_count": len(safe_get(host, "datastore", []) or []),
+			"network_count": len(safe_get(host, "network", []) or []),
+			"pnic": pnic_rows,
+			"vmkernel_nic": vmkernel_rows,
+		}
 
 
-def collect_esxi_user_rows(content: Any) -> list[dict[str, Any]]:
-	rows: list[dict[str, Any]] = []
+def collect_host_rows(content: Any) -> list[dict[str, Any]]:
+	return list(iter_host_rows(content))
+
+
+def iter_esxi_user_rows(content: Any) -> Iterable[dict[str, Any]]:
 	for host in iter_objects(content, vim.HostSystem):
 		account_manager = safe_get(safe_get(host, "configManager"), "accountManager")
 		if not account_manager:
@@ -282,51 +279,51 @@ def collect_esxi_user_rows(content: Any) -> list[dict[str, Any]]:
 		try:
 			groups = account_manager.QueryUserGroups(searchStr="", exactMatch=False, findUsers=True, findGroups=False)
 		except Exception as exc:
-			rows.append(
-				{
-					"host_name": safe_get(host, "name"),
-					"error": f"QueryUserGroups failed: {exc}",
-				}
-			)
+			yield {
+				"host_name": safe_get(host, "name"),
+				"error": f"QueryUserGroups failed: {exc}",
+			}
 			continue
 
 		for group in groups or []:
 			for user in safe_get(group, "users", []) or []:
-				rows.append(
-					{
-						"host_name": safe_get(host, "name"),
-						"group": safe_get(group, "group"),
-						"user": safe_get(user, "key"),
-						"full_name": safe_get(user, "fullName"),
-						"description": safe_get(user, "description"),
-					}
-				)
-
-	return rows
+				yield {
+					"host_name": safe_get(host, "name"),
+					"group": safe_get(group, "group"),
+					"user": safe_get(user, "key"),
+					"full_name": safe_get(user, "fullName"),
+					"description": safe_get(user, "description"),
+				}
 
 
-def collect_target_rows(content: Any) -> list[dict[str, Any]]:
+def collect_esxi_user_rows(content: Any) -> list[dict[str, Any]]:
+	return list(iter_esxi_user_rows(content))
+
+
+def iter_target_rows(content: Any) -> Iterable[dict[str, Any]]:
 	about = safe_get(content, "about")
 	setting = safe_get(content, "setting")
 	license_manager = safe_get(content, "licenseManager")
 	lic = safe_get(license_manager, "licenses", [])
 
-	return [
-		{
-			"api_type": safe_get(about, "apiType"),
-			"full_name": safe_get(about, "fullName"),
-			"name": safe_get(about, "name"),
-			"version": safe_get(about, "version"),
-			"build": safe_get(about, "build"),
-			"vendor": safe_get(about, "vendor"),
-			"os_type": safe_get(about, "osType"),
-			"instance_uuid": safe_get(about, "instanceUuid"),
-			"locale_version": safe_get(about, "localeVersion"),
-			"api_version": safe_get(about, "apiVersion"),
-			"setting_count": len(safe_get(setting, "setting", []) or []),
-			"license_count": len(lic or []),
-		}
-	]
+	yield {
+		"api_type": safe_get(about, "apiType"),
+		"full_name": safe_get(about, "fullName"),
+		"name": safe_get(about, "name"),
+		"version": safe_get(about, "version"),
+		"build": safe_get(about, "build"),
+		"vendor": safe_get(about, "vendor"),
+		"os_type": safe_get(about, "osType"),
+		"instance_uuid": safe_get(about, "instanceUuid"),
+		"locale_version": safe_get(about, "localeVersion"),
+		"api_version": safe_get(about, "apiVersion"),
+		"setting_count": len(safe_get(setting, "setting", []) or []),
+		"license_count": len(lic or []),
+	}
+
+
+def collect_target_rows(content: Any) -> list[dict[str, Any]]:
+	return list(iter_target_rows(content))
 
 
 def build_tables(content: Any) -> dict[str, list[dict[str, Any]]]:
@@ -444,10 +441,34 @@ def collect(
 				selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
 
 				typer.secho(f"[+] 已连接，目标类型: {target_kind}", fg=typer.colors.GREEN)
-				typer.echo(f"[*] 正在采集并导出 {selected_format.upper()}，请稍候 ...")
+				typer.echo(f"[*] 正在采集并实时导出 {selected_format.upper()}，请稍候 ...")
 
 				outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
-				stats = outputter.export_tables(build_tables(content))
+				checkpoint_rows = 20
+				stats: dict[str, int] = {}
+				table_collectors: list[tuple[str, Any]] = [
+					("target_info", iter_target_rows),
+					("hosts", iter_host_rows),
+					("virtual_machines", iter_vm_rows),
+					("datastores", iter_datastore_rows),
+					("networks", iter_network_rows),
+					("users", iter_esxi_user_rows),
+				]
+
+				for table_name, collector in table_collectors:
+					typer.echo(f"[*] 采集表: {table_name}")
+					rows: list[dict[str, Any]] = []
+					try:
+						for idx, row in enumerate(collector(content), start=1):
+							rows.append(row)
+							if idx % checkpoint_rows == 0:
+								outputter.write_table(table_name, rows)
+					finally:
+						outputter.write_table(table_name, rows)
+
+					stats[table_name] = len(rows)
+					typer.echo(f"  - {table_name}: {len(rows)} 行（已落盘）")
+
 				typer.secho(f"[+] 导出完成: {output_dir.resolve()}", fg=typer.colors.GREEN)
 				for table_name, count in stats.items():
 					typer.echo(f"  - {table_name}: {count} 行")
