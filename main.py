@@ -353,7 +353,7 @@ def global_options(
 	proxy: Optional[str] = typer.Option(
 		None,
 		"--proxy",
-		help="全局代理地址，支持 http:// https:// socks5:// ，示例: socks5://127.0.0.1:1080",
+		help="全局代理地址，支持 http:// https:// ，示例: http://127.0.0.1:8080",
 	),
 ) -> None:
 	ctx.ensure_object(dict)
