@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+from base64 import b64encode
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Optional
@@ -69,6 +70,27 @@ def _proxy_env_key_values(proxy_url: str) -> dict[str, str]:
         "https_proxy": proxy_url,
         "all_proxy": proxy_url,
     }
+
+
+def build_pyvmomi_proxy_kwargs(proxy: Optional[ProxyConfig]) -> dict[str, object]:
+    if proxy is None:
+        return {}
+
+    if proxy.scheme not in {"http", "https"}:
+        return {}
+
+    kwargs: dict[str, object] = {
+        "httpProxyHost": proxy.host,
+        "httpProxyPort": proxy.port,
+    }
+
+    if proxy.username:
+        user = proxy.username
+        pwd = proxy.password or ""
+        token = b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+        kwargs["customHeaders"] = {"Proxy-Authorization": f"Basic {token}"}
+
+    return kwargs
 
 
 @contextmanager

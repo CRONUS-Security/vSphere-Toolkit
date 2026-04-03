@@ -9,7 +9,7 @@ from typing import Any, Iterable, Optional
 
 import typer
 from core.outputter import ResultOutputter
-from core.proxy import ProxyConfig, parse_proxy, use_proxy
+from core.proxy import ProxyConfig, build_pyvmomi_proxy_kwargs, parse_proxy, use_proxy
 from pyVim.connect import Disconnect, SmartConnect
 from pyVmomi import vim
 
@@ -31,9 +31,10 @@ def build_ssl_context(skip_verify: bool) -> ssl.SSLContext:
 	return context
 
 
-def connect_vsphere(host: str, user: str, password: str, port: int, insecure: bool):
+def connect_vsphere(host: str, user: str, password: str, port: int, insecure: bool, proxy: Optional[ProxyConfig] = None):
 	ssl_context = build_ssl_context(skip_verify=insecure)
-	return SmartConnect(host=host, user=user, pwd=password, port=port, sslContext=ssl_context)
+	proxy_kwargs = build_pyvmomi_proxy_kwargs(proxy)
+	return SmartConnect(host=host, user=user, pwd=password, port=port, sslContext=ssl_context, **proxy_kwargs)
 
 
 def iter_objects(content: Any, vim_type: type) -> Iterable[Any]:
@@ -382,7 +383,7 @@ def probe(
 
 			si = None
 			try:
-				si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure)
+				si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure, proxy=proxy_config)
 				content = si.RetrieveContent()
 				target_kind = host_type(content)
 				about = safe_get(content, "about")
@@ -437,7 +438,7 @@ def collect(
 			si = None
 			try:
 				typer.echo(f"[*] 正在连接 {host}:{port} ...")
-				si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure)
+				si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure, proxy=proxy_config)
 				content = si.RetrieveContent()
 				target_kind = host_type(content)
 				selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
