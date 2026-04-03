@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ssl
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -35,6 +36,20 @@ def connect_vsphere(host: str, user: str, password: str, port: int, insecure: bo
 	ssl_context = build_ssl_context(skip_verify=insecure)
 	proxy_kwargs = build_pyvmomi_proxy_kwargs(proxy)
 	return SmartConnect(host=host, user=user, pwd=password, port=port, sslContext=ssl_context, **proxy_kwargs)
+
+
+def is_retryable_error(exc: Exception) -> bool:
+	message = str(exc).lower()
+	retry_keywords = [
+		"remote end closed connection",
+		"connection reset",
+		"connection aborted",
+		"timed out",
+		"timeout",
+		"temporarily unavailable",
+		"broken pipe",
+	]
+	return any(keyword in message for keyword in retry_keywords)
 
 
 def iter_objects(content: Any, vim_type: type) -> Iterable[Any]:
@@ -424,6 +439,9 @@ def collect(
 	port: int = typer.Option(443, "--port", help="API 端口"),
 	insecure: bool = typer.Option(False, "--insecure", help="跳过 SSL 校验（自签证书常用）"),
 	output_dir: Path = typer.Option(Path("./vSphere-info"), "--output-dir", help="输出目录"),
+	retry: int = typer.Option(3, "--retry", min=0, help="失败自动重试次数（不含首次）"),
+	retry_delay: float = typer.Option(2.0, "--retry-delay", min=0.0, help="首次重试前等待秒数"),
+	retry_backoff: float = typer.Option(2.0, "--retry-backoff", min=1.0, help="重试退避倍数"),
 ) -> None:
 	proxy_config: Optional[ProxyConfig] = (ctx.obj or {}).get("proxy")
 
@@ -432,49 +450,67 @@ def collect(
 			if active_proxy:
 				typer.echo(f"[*] 已启用代理: {active_proxy.display_url}")
 
-			si = None
-			try:
-				typer.echo(f"[*] 正在连接 {host}:{port} ...")
-				si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure, proxy=proxy_config)
-				content = si.RetrieveContent()
-				target_kind = host_type(content)
-				selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
+			attempt = 0
+			max_attempts = retry + 1
+			delay_seconds = retry_delay
 
-				typer.secho(f"[+] 已连接，目标类型: {target_kind}", fg=typer.colors.GREEN)
-				typer.echo(f"[*] 正在采集并实时导出 {selected_format.upper()}，请稍候 ...")
+			while attempt < max_attempts:
+				attempt += 1
+				si = None
+				try:
+					typer.echo(f"[*] 正在连接 {host}:{port} ... (尝试 {attempt}/{max_attempts})")
+					si = connect_vsphere(host=host, user=user, password=password or "", port=port, insecure=insecure, proxy=proxy_config)
+					content = si.RetrieveContent()
+					target_kind = host_type(content)
+					selected_format = (ctx.obj or {}).get("output_format", OutputFormat.csv.value)
 
-				outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
-				checkpoint_rows = 20
-				stats: dict[str, int] = {}
-				table_collectors: list[tuple[str, Any]] = [
-					("target_info", iter_target_rows),
-					("hosts", iter_host_rows),
-					("virtual_machines", iter_vm_rows),
-					("datastores", iter_datastore_rows),
-					("networks", iter_network_rows),
-					("users", iter_esxi_user_rows),
-				]
+					typer.secho(f"[+] 已连接，目标类型: {target_kind}", fg=typer.colors.GREEN)
+					typer.echo(f"[*] 正在采集并实时导出 {selected_format.upper()}，请稍候 ...")
 
-				for table_name, collector in table_collectors:
-					typer.echo(f"[*] 采集表: {table_name}")
-					rows: list[dict[str, Any]] = []
-					try:
-						for idx, row in enumerate(collector(content), start=1):
-							rows.append(row)
-							if idx % checkpoint_rows == 0:
-								outputter.write_table(table_name, rows)
-					finally:
-						outputter.write_table(table_name, rows)
+					outputter = ResultOutputter(output_dir=output_dir, output_format=selected_format)
+					checkpoint_rows = 20
+					stats: dict[str, int] = {}
+					table_collectors: list[tuple[str, Any]] = [
+						("target_info", iter_target_rows),
+						("hosts", iter_host_rows),
+						("virtual_machines", iter_vm_rows),
+						("datastores", iter_datastore_rows),
+						("networks", iter_network_rows),
+						("users", iter_esxi_user_rows),
+					]
 
-					stats[table_name] = len(rows)
-					typer.echo(f"  - {table_name}: {len(rows)} 行（已落盘）")
+					for table_name, collector in table_collectors:
+						typer.echo(f"[*] 采集表: {table_name}")
+						rows: list[dict[str, Any]] = []
+						try:
+							for idx, row in enumerate(collector(content), start=1):
+								rows.append(row)
+								if idx % checkpoint_rows == 0:
+									outputter.write_table(table_name, rows)
+						finally:
+							outputter.write_table(table_name, rows)
 
-				typer.secho(f"[+] 导出完成: {output_dir.resolve()}", fg=typer.colors.GREEN)
-				for table_name, count in stats.items():
-					typer.echo(f"  - {table_name}: {count} 行")
-			finally:
-				if si:
-					Disconnect(si)
+						stats[table_name] = len(rows)
+						typer.echo(f"  - {table_name}: {len(rows)} 行（已落盘）")
+
+					typer.secho(f"[+] 导出完成: {output_dir.resolve()}", fg=typer.colors.GREEN)
+					for table_name, count in stats.items():
+						typer.echo(f"  - {table_name}: {count} 行")
+					return
+				except Exception as exc:
+					can_retry = attempt < max_attempts and is_retryable_error(exc)
+					if not can_retry:
+						raise
+
+					typer.secho(
+						f"[!] 采集第 {attempt}/{max_attempts} 次失败: {exc}，{delay_seconds:.1f} 秒后自动重试...",
+						fg=typer.colors.YELLOW,
+					)
+					time.sleep(delay_seconds)
+					delay_seconds *= retry_backoff
+				finally:
+					if si:
+						Disconnect(si)
 	except Exception as exc:
 		typer.secho(f"[-] 采集失败: {exc}", fg=typer.colors.RED)
 		raise typer.Exit(code=1)
